@@ -77,3 +77,329 @@ export async function apiFetch(
 
   return fetch(input, init);
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Milestones & Disputes API client                                          */
+/* -------------------------------------------------------------------------- */
+
+/** Error thrown by the typed API client when a request fails. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly details?: unknown;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: unknown
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** Read the CSRF token from the cookie set by the backend. */
+function readCsrfToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+interface ApiClientOptions {
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  body?: unknown;
+  signal?: AbortSignal;
+}
+
+/**
+ * Typed JSON client built on top of `apiFetch`. Mutations automatically
+ * include the CSRF token and JSON content type. Non-2xx responses are
+ * converted into `ApiError` instances.
+ */
+async function apiClient<T>(
+  path: string,
+  options: ApiClientOptions = {}
+): Promise<T> {
+  const { method = "GET", body, signal } = options;
+  const headers: Record<string, string> = { Accept: "application/json" };
+
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
+  if (method !== "GET") {
+    const csrf = readCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
+
+  let response: Response;
+  try {
+    response = await apiFetch(path, {
+      method,
+      headers,
+      signal,
+      credentials: "same-origin",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    throw new ApiError(
+      err instanceof Error ? err.message : "Network request failed",
+      0
+    );
+  }
+
+  if (!response.ok) {
+    let payload: { message?: string; code?: string; details?: unknown } = {};
+    try {
+      payload = await response.json();
+    } catch {
+      /* ignore non-JSON error bodies */
+    }
+    throw new ApiError(
+      payload.message ?? `Request failed with status ${response.status}`,
+      response.status,
+      payload.code,
+      payload.details
+    );
+  }
+
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+/* ----------------------------- Milestones -------------------------------- */
+
+export type MilestoneStatus =
+  | "pending"
+  | "evidence_submitted"
+  | "approved"
+  | "released"
+  | "rejected";
+
+export interface MilestoneCondition {
+  id: string;
+  description: string;
+  type: "deliverable" | "approval" | "evidence";
+  satisfied: boolean;
+  approvedBy?: string;
+  approvedAt?: string;
+}
+
+export interface MilestoneEvidence {
+  id: string;
+  milestoneId: string;
+  fileName: string;
+  url: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  verified: boolean;
+}
+
+export interface Milestone {
+  id: string;
+  invoiceId: string;
+  title: string;
+  description?: string;
+  amount: number;
+  currency: string;
+  status: MilestoneStatus;
+  conditions: MilestoneCondition[];
+  evidence: MilestoneEvidence[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMilestoneInput {
+  invoiceId: string;
+  title: string;
+  description?: string;
+  amount: number;
+  currency: string;
+  conditions: Array<Pick<MilestoneCondition, "description" | "type">>;
+}
+
+export interface SubmitEvidenceInput {
+  fileName: string;
+  url: string;
+  notes?: string;
+}
+
+export interface ApproveConditionInput {
+  conditionId: string;
+  approved: boolean;
+  comment?: string;
+}
+
+/** Create a new milestone with its release conditions. */
+export function createMilestone(
+  input: CreateMilestoneInput,
+  signal?: AbortSignal
+): Promise<Milestone> {
+  return apiClient<Milestone>("/api/milestones", {
+    method: "POST",
+    body: input,
+    signal,
+  });
+}
+
+/** Attach evidence/documentation to a milestone. */
+export function submitMilestoneEvidence(
+  milestoneId: string,
+  input: SubmitEvidenceInput,
+  signal?: AbortSignal
+): Promise<MilestoneEvidence> {
+  return apiClient<MilestoneEvidence>(
+    `/api/milestones/${encodeURIComponent(milestoneId)}/evidence`,
+    { method: "POST", body: input, signal }
+  );
+}
+
+/** Approve or reject a single milestone condition. */
+export function approveMilestoneCondition(
+  milestoneId: string,
+  input: ApproveConditionInput,
+  signal?: AbortSignal
+): Promise<Milestone> {
+  return apiClient<Milestone>(
+    `/api/milestones/${encodeURIComponent(milestoneId)}/conditions/${encodeURIComponent(
+      input.conditionId
+    )}/approve`,
+    { method: "POST", body: input, signal }
+  );
+}
+
+/** Release the milestone funds once all conditions are satisfied. */
+export function releaseMilestone(
+  milestoneId: string,
+  signal?: AbortSignal
+): Promise<Milestone> {
+  return apiClient<Milestone>(
+    `/api/milestones/${encodeURIComponent(milestoneId)}/release`,
+    { method: "POST", signal }
+  );
+}
+
+/* ------------------------------ Disputes --------------------------------- */
+
+export type DisputeStatus =
+  | "open"
+  | "evidence"
+  | "arbitration"
+  | "resolved"
+  | "enforced";
+
+export interface DisputeEvidence {
+  id: string;
+  disputeId: string;
+  submittedBy: string;
+  fileName: string;
+  url: string;
+  notes?: string;
+  submittedAt: string;
+}
+
+export interface DisputeTimelineEntry {
+  id: string;
+  disputeId: string;
+  action: string;
+  actor: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Dispute {
+  id: string;
+  invoiceId: string;
+  openedBy: string;
+  reason: string;
+  status: DisputeStatus;
+  arbitratorId?: string;
+  evidence: DisputeEvidence[];
+  timeline: DisputeTimelineEntry[];
+  resolution?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDisputeInput {
+  invoiceId: string;
+  reason: string;
+  description?: string;
+}
+
+export interface SubmitDisputeEvidenceInput {
+  fileName: string;
+  url: string;
+  notes?: string;
+}
+
+export interface AssignArbitratorInput {
+  arbitratorId: string;
+}
+
+export interface ResolveDisputeInput {
+  resolution: string;
+  favorParty: "payer" | "recipient" | "split";
+  splitPercentage?: number;
+}
+
+/** Open a new dispute for an invoice. */
+export function createDispute(
+  input: CreateDisputeInput,
+  signal?: AbortSignal
+): Promise<Dispute> {
+  return apiClient<Dispute>("/api/disputes", {
+    method: "POST",
+    body: input,
+    signal,
+  });
+}
+
+/** Submit evidence from either party to a dispute. */
+export function submitDisputeEvidence(
+  disputeId: string,
+  input: SubmitDisputeEvidenceInput,
+  signal?: AbortSignal
+): Promise<DisputeEvidence> {
+  return apiClient<DisputeEvidence>(
+    `/api/disputes/${encodeURIComponent(disputeId)}/evidence`,
+    { method: "POST", body: input, signal }
+  );
+}
+
+/** Assign an arbitrator to a dispute. */
+export function assignDisputeArbitrator(
+  disputeId: string,
+  input: AssignArbitratorInput,
+  signal?: AbortSignal
+): Promise<Dispute> {
+  return apiClient<Dispute>(
+    `/api/disputes/${encodeURIComponent(disputeId)}/arbitrator`,
+    { method: "POST", body: input, signal }
+  );
+}
+
+/** Record the arbitrator's decision on a dispute. */
+export function resolveDispute(
+  disputeId: string,
+  input: ResolveDisputeInput,
+  signal?: AbortSignal
+): Promise<Dispute> {
+  return apiClient<Dispute>(
+    `/api/disputes/${encodeURIComponent(disputeId)}/resolve`,
+    { method: "POST", body: input, signal }
+  );
+}
+
+/** Enforce the recorded resolution (e.g. move funds accordingly). */
+export function enforceDisputeResolution(
+  disputeId: string,
+  signal?: AbortSignal
+): Promise<Dispute> {
+  return apiClient<Dispute>(
+    `/api/disputes/${encodeURIComponent(disputeId)}/enforce`,
+    { method: "POST", signal }
+  );
+}

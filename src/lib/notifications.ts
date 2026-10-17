@@ -7,6 +7,12 @@ interface NotificationPreferences {
   deadlineApproaching: boolean;
   invoiceReleased: boolean;
   invoiceRefunded: boolean;
+  milestoneConditionMet: boolean;
+  milestoneReleased: boolean;
+  disputeOpened: boolean;
+  disputeEvidenceSubmitted: boolean;
+  disputeResolved: boolean;
+  disputeEnforced: boolean;
 }
 
 const DEFAULT_PREFS: NotificationPreferences = {
@@ -15,6 +21,12 @@ const DEFAULT_PREFS: NotificationPreferences = {
   deadlineApproaching: true,
   invoiceReleased: true,
   invoiceRefunded: true,
+  milestoneConditionMet: true,
+  milestoneReleased: true,
+  disputeOpened: true,
+  disputeEvidenceSubmitted: true,
+  disputeResolved: true,
+  disputeEnforced: true,
 };
 
 function getPreferences(): NotificationPreferences {
@@ -127,6 +139,82 @@ export function notifyInvoiceRefunded(invoiceId: string): void {
   sendBrowserNotification(`Invoice #${invoiceId} refunded`, {
     body: "All payments have been refunded.",
     tag: `invoice-refunded-${invoiceId}`,
+  });
+}
+
+/** Notify when a milestone condition is satisfied. */
+export function notifyMilestoneConditionMet(
+  invoiceId: string,
+  milestoneId: string,
+  conditionLabel: string
+): void {
+  const prefs = getPreferences();
+  if (!prefs.milestoneConditionMet) return;
+  sendBrowserNotification(`Milestone condition met on Invoice #${invoiceId}`, {
+    body: `Condition "${conditionLabel}" for milestone ${milestoneId} has been satisfied.`,
+    tag: `milestone-condition-met-${invoiceId}-${milestoneId}`,
+  });
+}
+
+/** Notify when milestone funds are released. */
+export function notifyMilestoneReleased(
+  invoiceId: string,
+  milestoneId: string,
+  amountLabel: string
+): void {
+  const prefs = getPreferences();
+  if (!prefs.milestoneReleased) return;
+  sendBrowserNotification(`Milestone ${milestoneId} released on Invoice #${invoiceId}`, {
+    body: `${amountLabel} USDC released for milestone ${milestoneId}.`,
+    tag: `milestone-released-${invoiceId}-${milestoneId}`,
+  });
+}
+
+/** Notify when a dispute is opened on an invoice. */
+export function notifyDisputeOpened(invoiceId: string, disputeId: string): void {
+  const prefs = getPreferences();
+  if (!prefs.disputeOpened) return;
+  sendBrowserNotification(`Dispute opened on Invoice #${invoiceId}`, {
+    body: `Dispute ${disputeId} has been opened.`,
+    tag: `dispute-opened-${invoiceId}-${disputeId}`,
+  });
+}
+
+/** Notify when evidence is submitted to a dispute. */
+export function notifyDisputeEvidenceSubmitted(
+  invoiceId: string,
+  disputeId: string,
+  submitterLabel: string
+): void {
+  const prefs = getPreferences();
+  if (!prefs.disputeEvidenceSubmitted) return;
+  sendBrowserNotification(`New evidence on dispute ${disputeId}`, {
+    body: `${submitterLabel} submitted evidence for Invoice #${invoiceId}.`,
+    tag: `dispute-evidence-${invoiceId}-${disputeId}`,
+  });
+}
+
+/** Notify when a dispute is resolved by an arbitrator. */
+export function notifyDisputeResolved(
+  invoiceId: string,
+  disputeId: string,
+  resolutionLabel: string
+): void {
+  const prefs = getPreferences();
+  if (!prefs.disputeResolved) return;
+  sendBrowserNotification(`Dispute ${disputeId} resolved`, {
+    body: `Resolution for Invoice #${invoiceId}: ${resolutionLabel}.`,
+    tag: `dispute-resolved-${invoiceId}-${disputeId}`,
+  });
+}
+
+/** Notify when a dispute resolution is enforced on-chain. */
+export function notifyDisputeEnforced(invoiceId: string, disputeId: string): void {
+  const prefs = getPreferences();
+  if (!prefs.disputeEnforced) return;
+  sendBrowserNotification(`Dispute ${disputeId} resolution enforced`, {
+    body: `The resolution for Invoice #${invoiceId} has been enforced.`,
+    tag: `dispute-enforced-${invoiceId}-${disputeId}`,
   });
 }
 

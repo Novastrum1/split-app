@@ -73,3 +73,121 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   const freshToken = await getCsrfToken(true);
   return attempt(freshToken);
 }
+
+/**
+ * Helper for JSON POSTs through apiFetch. Throws on non-2xx responses so
+ * callers can surface errors in the UI.
+ */
+async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
+  const response = await apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`Request to ${url} failed with status ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+// --- Milestones (#876) ---
+
+export interface MilestoneInput {
+  invoiceId: string;
+  title: string;
+  description?: string;
+  amount: number;
+  dueDate?: string;
+  conditions?: string[];
+}
+
+export interface MilestoneEvidenceInput {
+  milestoneId: string;
+  fileName: string;
+  contentType: string;
+  /** Base64-encoded file contents. */
+  data: string;
+  notes?: string;
+}
+
+export interface MilestoneApprovalInput {
+  milestoneId: string;
+  approverId: string;
+  approved: boolean;
+  comment?: string;
+}
+
+export interface MilestoneReleaseInput {
+  milestoneId: string;
+  amount?: number;
+}
+
+export function postMilestone<T = unknown>(input: MilestoneInput): Promise<T> {
+  return postJson<T>("/api/milestones", input);
+}
+
+export function postMilestoneEvidence<T = unknown>(input: MilestoneEvidenceInput): Promise<T> {
+  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/evidence`, input);
+}
+
+export function postMilestoneApproval<T = unknown>(input: MilestoneApprovalInput): Promise<T> {
+  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/approvals`, input);
+}
+
+export function postMilestoneRelease<T = unknown>(input: MilestoneReleaseInput): Promise<T> {
+  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/release`, input);
+}
+
+// --- Disputes (#877) ---
+
+export interface DisputeInput {
+  invoiceId: string;
+  reason: string;
+  details?: string;
+  amount?: number;
+}
+
+export interface DisputeEvidenceInput {
+  disputeId: string;
+  fileName: string;
+  contentType: string;
+  /** Base64-encoded file contents. */
+  data: string;
+  notes?: string;
+}
+
+export interface DisputeArbitratorInput {
+  disputeId: string;
+  arbitratorId: string;
+}
+
+export interface DisputeResolveInput {
+  disputeId: string;
+  resolution: string;
+  awardedAmount?: number;
+  notes?: string;
+}
+
+export interface DisputeEnforceInput {
+  disputeId: string;
+}
+
+export function postDispute<T = unknown>(input: DisputeInput): Promise<T> {
+  return postJson<T>("/api/disputes", input);
+}
+
+export function postDisputeEvidence<T = unknown>(input: DisputeEvidenceInput): Promise<T> {
+  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/evidence`, input);
+}
+
+export function postDisputeArbitrator<T = unknown>(input: DisputeArbitratorInput): Promise<T> {
+  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/arbitrator`, input);
+}
+
+export function postDisputeResolve<T = unknown>(input: DisputeResolveInput): Promise<T> {
+  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/resolve`, input);
+}
+
+export function postDisputeEnforce<T = unknown>(input: DisputeEnforceInput): Promise<T> {
+  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/enforce`, input);
+}
