@@ -283,16 +283,98 @@ export async function fetchUsdcBalance(
 }
 
 /**
- * Resolve a federation address (e.g., alice*example.com) to a Stellar address
+ * Validate a Stellar account address using StrKey.
+ * Returns true only for well-formed, checksum-valid ed25519 public keys.
  */
-export async function resolveFederationAddress(federationAddress: string): Promise<string | null> {
+export function validateStellarAddress(address: string): boolean {
+  if (typeof address !== "string" || address.length === 0) return false;
+  try {
+    // StrKey is a synchronous part of the SDK; require it lazily to keep the
+    // module load-time footprint small.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { StrKey } = require("@stellar/stellar-sdk") as typeof import("@stellar/stellar-sdk");
+    return StrKey.isValidEd25519PublicKey(address);
+  } catch {
+    return false;
+  }
+}
+
+export const FEDERATION_SERVER_URL =
+  process.env.NEXT_PUBLIC_FEDERATION_SERVER_URL ?? "https://federation.stellar.org";
+export const FEDERATION_TIMEOUT_MS = 8000;
+
+/**
+ * Resolve a federation address (e.g., alice*example.com) to a Stellar address.
+ *
+ * Uses the configured federation server URL and a bounded timeout so a slow or
+ * unreachable server cannot hang the UI. Returns null on any failure.
+ */
+export async function resolveFederationAddress(
+  federationAddress: string,
+  options: { serverUrl?: string; timeoutMs?: number } = {}
+): Promise<string | null> {
+  if (typeof federationAddress !== "string" || !federationAddress.includes("*")) {
+    return null;
+  }
+
+  const serverUrl = options.serverUrl ?? FEDERATION_SERVER_URL;
+  const timeoutMs = options.timeoutMs ?? FEDERATION_TIMEOUT_MS;
+
   try {
     const { Federation } = await import("@stellar/stellar-sdk");
-    const result = await Federation.Server.resolve(federationAddress);
-    return result.account_id;
+    const server = new Federation.Server(serverUrl);
+    const result = await Promise.race([
+      server.resolve(federationAddress),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Federation resolution timed out.")), timeoutMs)
+      ),
+    ]);
+    return result.account_id ?? null;
   } catch {
     return null;
   }
+}
+
+export interface AccountBalance {
+  /** Asset code, or "XLM" for the native asset. */
+  assetCode: string;
+  /** Issuer account for issued assets; null for native XLM. */
+  assetIssuer: string | null;
+  /** Raw balance in stroops. */
+  raw: bigint;
+  /** Human-readable balance (7 decimal places). */
+  formatted: string;
+  /** Whether this is the native XLM asset. */
+  isNative: boolean;
+}
+
+/**
+ * Fetch all balances (native XLM plus issued assets) for an account from Horizon.
+ *
+ * Throws if the account cannot be loaded (e.g. unfunded or invalid address).
+ */
+export async function fetchAccountBalances(walletAddress: string): Promise<AccountBalance[]> {
+  const { Horizon } = await import("@stellar/stellar-sdk");
+  const server = new Horizon.Server(HORIZON_URL);
+  const account = await server.loadAccount(walletAddress);
+
+  return account.balances.map((balance) => {
+    const isNative = balance.asset_type === "native";
+    const assetCode = isNative ? "XLM" : (balance as { asset_code?: string }).asset_code ?? "";
+    const assetIssuer = isNative
+      ? null
+      : (balance as { asset_issuer?: string }).asset_issuer ?? null;
+    const raw = BigInt(
+      Math.round(parseFloat(balance.balance) * 1e7)
+    );
+    return {
+      assetCode,
+      assetIssuer,
+      raw,
+      formatted: formatAmount(raw),
+      isNative,
+    };
+  });
 }
 
 /**

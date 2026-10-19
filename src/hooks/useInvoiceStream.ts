@@ -5,11 +5,13 @@ import type { Invoice } from '@stellar-split/sdk';
 import type { StellarSplitClient } from '@stellar-split/sdk';
 
 export interface InvoiceStreamEvent {
-  type: 'PaymentReceived' | 'InvoiceReleased' | 'InvoiceRefunded';
+  type: 'PaymentReceived' | 'InvoiceReleased' | 'InvoiceRefunded' | 'CoSignerApproved';
   /** Payer address for PaymentReceived events */
   payer?: string;
   /** Amount in stroops for PaymentReceived events */
   amount?: bigint;
+  /** Co-signer address for CoSignerApproved events */
+  coSigner?: string;
   /** Raw event data */
   raw: unknown;
 }
@@ -19,6 +21,10 @@ export interface UseInvoiceStreamResult {
   latestEvent: InvoiceStreamEvent | null;
   isConnected: boolean;
   error: string | null;
+  /** Increments whenever a co-signer approval event is observed. */
+  coSignerApprovalCount: number;
+  /** Latest co-signer address that approved, if any. */
+  lastApprovedCoSigner: string | null;
 }
 
 const POLL_INTERVAL_MS = 3_000;
@@ -43,6 +49,8 @@ export function useInvoiceStream(invoiceId: string): UseInvoiceStreamResult {
   const [latestEvent, setLatestEvent] = useState<InvoiceStreamEvent | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [coSignerApprovalCount, setCoSignerApprovalCount] = useState(0);
+  const [lastApprovedCoSigner, setLastApprovedCoSigner] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectDelayRef = useRef(1_000);
@@ -148,6 +156,18 @@ export function useInvoiceStream(invoiceId: string): UseInvoiceStreamResult {
                   type: 'InvoiceRefunded',
                   raw: event,
                 });
+              } else if (
+                eventName.includes('CoSignerApproved') ||
+                eventName.includes('CosignerApproved')
+              ) {
+                const coSigner = topics[1]?.toString() ?? '';
+                setLatestEvent({
+                  type: 'CoSignerApproved',
+                  coSigner,
+                  raw: event,
+                });
+                setCoSignerApprovalCount((count) => count + 1);
+                setLastApprovedCoSigner(coSigner || null);
               }
             } catch {
               // Skip unparseable events
@@ -168,6 +188,8 @@ export function useInvoiceStream(invoiceId: string): UseInvoiceStreamResult {
     mountedRef.current = true;
     lastEventCursorRef.current = null;
     lastStatusRef.current = null;
+    setCoSignerApprovalCount(0);
+    setLastApprovedCoSigner(null);
 
     // Initial fetch
     fetchInvoice();
@@ -205,5 +227,12 @@ export function useInvoiceStream(invoiceId: string): UseInvoiceStreamResult {
     return () => clearTimeout(retryTimer);
   }, [isConnected, fetchInvoice]);
 
-  return { invoice, latestEvent, isConnected, error };
+  return {
+    invoice,
+    latestEvent,
+    isConnected,
+    error,
+    coSignerApprovalCount,
+    lastApprovedCoSigner,
+  };
 }

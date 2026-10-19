@@ -75,119 +75,92 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
 }
 
 /**
- * Helper for JSON POSTs through apiFetch. Throws on non-2xx responses so
- * callers can surface errors in the UI.
+ * Accounting integration API client (issue #878).
+ *
+ * These helpers back the payment export / reconciliation integration
+ * endpoints. Mutating calls go through `apiFetch` so the CSRF token is
+ * attached automatically.
  */
-async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
-  const response = await apiFetch(url, {
+
+export type AccountingExportFormat = "csv" | "json" | "pdf";
+
+export interface AccountingExportFilters {
+  /** Inclusive ISO date (YYYY-MM-DD) lower bound. */
+  startDate?: string;
+  /** Inclusive ISO date (YYYY-MM-DD) upper bound. */
+  endDate?: string;
+  /** Invoice statuses to include, e.g. ["paid", "pending"]. */
+  statuses?: string[];
+}
+
+export interface AccountingExportPayload extends AccountingExportFilters {
+  format: AccountingExportFormat;
+  /** Optional accounting provider identifier, e.g. "quickbooks". */
+  provider?: string;
+}
+
+export interface AccountingExport {
+  id: string;
+  format: AccountingExportFormat;
+  status: "pending" | "processing" | "completed" | "failed";
+  filters: AccountingExportFilters;
+  provider?: string;
+  downloadUrl?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export interface ReconciliationReport {
+  id?: string;
+  periodStart: string;
+  periodEnd: string;
+  /** Totals keyed by invoice status or provider-specific bucket. */
+  totals: Record<string, number>;
+  lineItems?: Array<Record<string, unknown>>;
+  generatedAt?: string;
+}
+
+async function parseJsonOrThrow<T>(response: Response, action: string): Promise<T> {
+  if (!response.ok) {
+    throw new Error(`Failed to ${action}: ${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+/** Create a new accounting export (CSV, JSON or PDF). */
+export async function createAccountingExport(
+  payload: AccountingExportPayload
+): Promise<AccountingExport> {
+  const response = await apiFetch("/api/accounting/exports", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
-  if (!response.ok) {
-    throw new Error(`Request to ${url} failed with status ${response.status}`);
-  }
-  return response.json() as Promise<T>;
+  return parseJsonOrThrow<AccountingExport>(response, "create accounting export");
 }
 
-// --- Milestones (#876) ---
-
-export interface MilestoneInput {
-  invoiceId: string;
-  title: string;
-  description?: string;
-  amount: number;
-  dueDate?: string;
-  conditions?: string[];
+/** List previously created accounting exports (export history). */
+export async function listAccountingExports(): Promise<AccountingExport[]> {
+  const response = await apiFetch("/api/accounting/exports", { method: "GET" });
+  return parseJsonOrThrow<AccountingExport[]>(response, "list accounting exports");
 }
 
-export interface MilestoneEvidenceInput {
-  milestoneId: string;
-  fileName: string;
-  contentType: string;
-  /** Base64-encoded file contents. */
-  data: string;
-  notes?: string;
+/** Fetch a single accounting export by id. */
+export async function getAccountingExport(id: string): Promise<AccountingExport> {
+  const response = await apiFetch(`/api/accounting/exports/${encodeURIComponent(id)}`, {
+    method: "GET",
+  });
+  return parseJsonOrThrow<AccountingExport>(response, "get accounting export");
 }
 
-export interface MilestoneApprovalInput {
-  milestoneId: string;
-  approverId: string;
-  approved: boolean;
-  comment?: string;
-}
-
-export interface MilestoneReleaseInput {
-  milestoneId: string;
-  amount?: number;
-}
-
-export function postMilestone<T = unknown>(input: MilestoneInput): Promise<T> {
-  return postJson<T>("/api/milestones", input);
-}
-
-export function postMilestoneEvidence<T = unknown>(input: MilestoneEvidenceInput): Promise<T> {
-  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/evidence`, input);
-}
-
-export function postMilestoneApproval<T = unknown>(input: MilestoneApprovalInput): Promise<T> {
-  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/approvals`, input);
-}
-
-export function postMilestoneRelease<T = unknown>(input: MilestoneReleaseInput): Promise<T> {
-  return postJson<T>(`/api/milestones/${encodeURIComponent(input.milestoneId)}/release`, input);
-}
-
-// --- Disputes (#877) ---
-
-export interface DisputeInput {
-  invoiceId: string;
-  reason: string;
-  details?: string;
-  amount?: number;
-}
-
-export interface DisputeEvidenceInput {
-  disputeId: string;
-  fileName: string;
-  contentType: string;
-  /** Base64-encoded file contents. */
-  data: string;
-  notes?: string;
-}
-
-export interface DisputeArbitratorInput {
-  disputeId: string;
-  arbitratorId: string;
-}
-
-export interface DisputeResolveInput {
-  disputeId: string;
-  resolution: string;
-  awardedAmount?: number;
-  notes?: string;
-}
-
-export interface DisputeEnforceInput {
-  disputeId: string;
-}
-
-export function postDispute<T = unknown>(input: DisputeInput): Promise<T> {
-  return postJson<T>("/api/disputes", input);
-}
-
-export function postDisputeEvidence<T = unknown>(input: DisputeEvidenceInput): Promise<T> {
-  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/evidence`, input);
-}
-
-export function postDisputeArbitrator<T = unknown>(input: DisputeArbitratorInput): Promise<T> {
-  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/arbitrator`, input);
-}
-
-export function postDisputeResolve<T = unknown>(input: DisputeResolveInput): Promise<T> {
-  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/resolve`, input);
-}
-
-export function postDisputeEnforce<T = unknown>(input: DisputeEnforceInput): Promise<T> {
-  return postJson<T>(`/api/disputes/${encodeURIComponent(input.disputeId)}/enforce`, input);
+/** Push a reconciliation report to the accounting integration. */
+export async function pushReconciliationReport(
+  report: ReconciliationReport
+): Promise<ReconciliationReport> {
+  const response = await apiFetch("/api/accounting/reconciliations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(report),
+  });
+  return parseJsonOrThrow<ReconciliationReport>(response, "push reconciliation report");
 }

@@ -79,327 +79,233 @@ export async function apiFetch(
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Milestones & Disputes API client                                          */
+/*                          Co-signer API helpers                             */
 /* -------------------------------------------------------------------------- */
 
-/** Error thrown by the typed API client when a request fails. */
-export class ApiError extends Error {
+/** Approval state of a single co-signer. */
+export type CoSignerStatus = "pending" | "approved";
+
+/** A single required co-signer on an invoice. */
+export interface CoSigner {
+  /** Stellar address of the co-signer. */
+  address: string;
+  /** Current approval state. */
+  status: CoSignerStatus;
+  /** Optional signature payload submitted on approval. */
+  signature?: string;
+  /** ISO timestamp of when the co-signer approved, if applicable. */
+  approvedAt?: string;
+}
+
+/** Shape returned by `fetchCoSigners`. */
+export interface CoSignerState {
+  cosigners: CoSigner[];
+  cosignerThreshold: number;
+}
+
+/** Classified error thrown by the co-signer helpers. */
+export class CoSignerApiError extends Error {
+  /** HTTP status code, or 0 for network/parse failures. */
   readonly status: number;
-  readonly code?: string;
-  readonly details?: unknown;
+  /** Machine-readable error classification. */
+  readonly code:
+    | "network"
+    | "unauthorized"
+    | "forbidden"
+    | "not_found"
+    | "conflict"
+    | "rate_limited"
+    | "server"
+    | "parse"
+    | "unknown";
 
   constructor(
     message: string,
     status: number,
-    code?: string,
-    details?: unknown
+    code: CoSignerApiError["code"]
   ) {
     super(message);
-    this.name = "ApiError";
+    this.name = "CoSignerApiError";
     this.status = status;
     this.code = code;
-    this.details = details;
   }
 }
 
-/** Read the CSRF token from the cookie set by the backend. */
-function readCsrfToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+function classifyStatus(status: number): CoSignerApiError["code"] {
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status === 409) return "conflict";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "server";
+  return "unknown";
 }
 
-interface ApiClientOptions {
-  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  body?: unknown;
-  signal?: AbortSignal;
+async function readErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = await response.json();
+    if (body && typeof body.error === "string") return body.error;
+    if (body && typeof body.message === "string") return body.message;
+  } catch {
+    /* ignore parse failures */
+  }
+  return `Request failed with status ${response.status}`;
+}
+
+function normalizeCoSigner(raw: unknown): CoSigner {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  const status = record.status === "approved" ? "approved" : "pending";
+  return {
+    address: typeof record.address === "string" ? record.address : "",
+    status,
+    signature:
+      typeof record.signature === "string" ? record.signature : undefined,
+    approvedAt:
+      typeof record.approvedAt === "string" ? record.approvedAt : undefined,
+  };
 }
 
 /**
- * Typed JSON client built on top of `apiFetch`. Mutations automatically
- * include the CSRF token and JSON content type. Non-2xx responses are
- * converted into `ApiError` instances.
+ * Fetch the co-signer list and threshold for an invoice.
+ *
+ * Reads `splitMeta.cosigners` and `splitMeta.cosignerThreshold` from
+ * `GET /api/invoices/:id`.
  */
-async function apiClient<T>(
-  path: string,
-  options: ApiClientOptions = {}
-): Promise<T> {
-  const { method = "GET", body, signal } = options;
-  const headers: Record<string, string> = { Accept: "application/json" };
-
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-
-  if (method !== "GET") {
-    const csrf = readCsrfToken();
-    if (csrf) headers["X-CSRF-Token"] = csrf;
-  }
-
+export async function fetchCoSigners(
+  invoiceId: string
+): Promise<CoSignerState> {
   let response: Response;
   try {
-    response = await apiFetch(path, {
-      method,
-      headers,
-      signal,
-      credentials: "same-origin",
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}`);
   } catch (err) {
-    throw new ApiError(
+    throw new CoSignerApiError(
       err instanceof Error ? err.message : "Network request failed",
-      0
+      0,
+      "network"
     );
   }
 
   if (!response.ok) {
-    let payload: { message?: string; code?: string; details?: unknown } = {};
-    try {
-      payload = await response.json();
-    } catch {
-      /* ignore non-JSON error bodies */
-    }
-    throw new ApiError(
-      payload.message ?? `Request failed with status ${response.status}`,
+    throw new CoSignerApiError(
+      await readErrorMessage(response),
       response.status,
-      payload.code,
-      payload.details
+      classifyStatus(response.status)
     );
   }
 
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new CoSignerApiError(
+      "Failed to parse invoice response",
+      response.status,
+      "parse"
+    );
+  }
+
+  const splitMeta =
+    body && typeof body === "object"
+      ? ((body as Record<string, unknown>).splitMeta as
+          | Record<string, unknown>
+          | undefined)
+      : undefined;
+
+  const rawCosigners = Array.isArray(splitMeta?.cosigners)
+    ? (splitMeta!.cosigners as unknown[])
+    : [];
+  const threshold =
+    typeof splitMeta?.cosignerThreshold === "number"
+      ? splitMeta.cosignerThreshold
+      : 0;
+
+  return {
+    cosigners: rawCosigners.map(normalizeCoSigner),
+    cosignerThreshold: threshold,
+  };
 }
 
-/* ----------------------------- Milestones -------------------------------- */
+/**
+ * Submit an approval for a co-signer by patching the invoice's `splitMeta`.
+ *
+ * Sends `PATCH /api/invoices/:id` with the updated co-signer entry. The
+ * caller is responsible for passing the full current list via `cosigners`
+ * when the backend requires a full replacement; otherwise only the approving
+ * address is sent.
+ */
+export async function submitCoSignerApproval(
+  invoiceId: string,
+  address: string,
+  signature?: string,
+  cosigners?: CoSigner[]
+): Promise<CoSignerState> {
+  const approvedEntry: CoSigner = {
+    address,
+    status: "approved",
+    signature,
+    approvedAt: new Date().toISOString(),
+  };
 
-export type MilestoneStatus =
-  | "pending"
-  | "evidence_submitted"
-  | "approved"
-  | "released"
-  | "rejected";
+  const nextCosigners = cosigners
+    ? cosigners.map((c) => (c.address === address ? approvedEntry : c))
+    : [approvedEntry];
 
-export interface MilestoneCondition {
-  id: string;
-  description: string;
-  type: "deliverable" | "approval" | "evidence";
-  satisfied: boolean;
-  approvedBy?: string;
-  approvedAt?: string;
-}
+  let response: Response;
+  try {
+    response = await apiFetch(
+      `/api/invoices/${encodeURIComponent(invoiceId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          splitMeta: { cosigners: nextCosigners },
+        }),
+      }
+    );
+  } catch (err) {
+    throw new CoSignerApiError(
+      err instanceof Error ? err.message : "Network request failed",
+      0,
+      "network"
+    );
+  }
 
-export interface MilestoneEvidence {
-  id: string;
-  milestoneId: string;
-  fileName: string;
-  url: string;
-  uploadedBy: string;
-  uploadedAt: string;
-  verified: boolean;
-}
+  if (!response.ok) {
+    throw new CoSignerApiError(
+      await readErrorMessage(response),
+      response.status,
+      classifyStatus(response.status)
+    );
+  }
 
-export interface Milestone {
-  id: string;
-  invoiceId: string;
-  title: string;
-  description?: string;
-  amount: number;
-  currency: string;
-  status: MilestoneStatus;
-  conditions: MilestoneCondition[];
-  evidence: MilestoneEvidence[];
-  createdAt: string;
-  updatedAt: string;
-}
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new CoSignerApiError(
+      "Failed to parse approval response",
+      response.status,
+      "parse"
+    );
+  }
 
-export interface CreateMilestoneInput {
-  invoiceId: string;
-  title: string;
-  description?: string;
-  amount: number;
-  currency: string;
-  conditions: Array<Pick<MilestoneCondition, "description" | "type">>;
-}
+  const splitMeta =
+    body && typeof body === "object"
+      ? ((body as Record<string, unknown>).splitMeta as
+          | Record<string, unknown>
+          | undefined)
+      : undefined;
 
-export interface SubmitEvidenceInput {
-  fileName: string;
-  url: string;
-  notes?: string;
-}
+  const rawCosigners = Array.isArray(splitMeta?.cosigners)
+    ? (splitMeta!.cosigners as unknown[])
+    : nextCosigners;
+  const threshold =
+    typeof splitMeta?.cosignerThreshold === "number"
+      ? splitMeta.cosignerThreshold
+      : 0;
 
-export interface ApproveConditionInput {
-  conditionId: string;
-  approved: boolean;
-  comment?: string;
-}
-
-/** Create a new milestone with its release conditions. */
-export function createMilestone(
-  input: CreateMilestoneInput,
-  signal?: AbortSignal
-): Promise<Milestone> {
-  return apiClient<Milestone>("/api/milestones", {
-    method: "POST",
-    body: input,
-    signal,
-  });
-}
-
-/** Attach evidence/documentation to a milestone. */
-export function submitMilestoneEvidence(
-  milestoneId: string,
-  input: SubmitEvidenceInput,
-  signal?: AbortSignal
-): Promise<MilestoneEvidence> {
-  return apiClient<MilestoneEvidence>(
-    `/api/milestones/${encodeURIComponent(milestoneId)}/evidence`,
-    { method: "POST", body: input, signal }
-  );
-}
-
-/** Approve or reject a single milestone condition. */
-export function approveMilestoneCondition(
-  milestoneId: string,
-  input: ApproveConditionInput,
-  signal?: AbortSignal
-): Promise<Milestone> {
-  return apiClient<Milestone>(
-    `/api/milestones/${encodeURIComponent(milestoneId)}/conditions/${encodeURIComponent(
-      input.conditionId
-    )}/approve`,
-    { method: "POST", body: input, signal }
-  );
-}
-
-/** Release the milestone funds once all conditions are satisfied. */
-export function releaseMilestone(
-  milestoneId: string,
-  signal?: AbortSignal
-): Promise<Milestone> {
-  return apiClient<Milestone>(
-    `/api/milestones/${encodeURIComponent(milestoneId)}/release`,
-    { method: "POST", signal }
-  );
-}
-
-/* ------------------------------ Disputes --------------------------------- */
-
-export type DisputeStatus =
-  | "open"
-  | "evidence"
-  | "arbitration"
-  | "resolved"
-  | "enforced";
-
-export interface DisputeEvidence {
-  id: string;
-  disputeId: string;
-  submittedBy: string;
-  fileName: string;
-  url: string;
-  notes?: string;
-  submittedAt: string;
-}
-
-export interface DisputeTimelineEntry {
-  id: string;
-  disputeId: string;
-  action: string;
-  actor: string;
-  timestamp: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface Dispute {
-  id: string;
-  invoiceId: string;
-  openedBy: string;
-  reason: string;
-  status: DisputeStatus;
-  arbitratorId?: string;
-  evidence: DisputeEvidence[];
-  timeline: DisputeTimelineEntry[];
-  resolution?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface CreateDisputeInput {
-  invoiceId: string;
-  reason: string;
-  description?: string;
-}
-
-export interface SubmitDisputeEvidenceInput {
-  fileName: string;
-  url: string;
-  notes?: string;
-}
-
-export interface AssignArbitratorInput {
-  arbitratorId: string;
-}
-
-export interface ResolveDisputeInput {
-  resolution: string;
-  favorParty: "payer" | "recipient" | "split";
-  splitPercentage?: number;
-}
-
-/** Open a new dispute for an invoice. */
-export function createDispute(
-  input: CreateDisputeInput,
-  signal?: AbortSignal
-): Promise<Dispute> {
-  return apiClient<Dispute>("/api/disputes", {
-    method: "POST",
-    body: input,
-    signal,
-  });
-}
-
-/** Submit evidence from either party to a dispute. */
-export function submitDisputeEvidence(
-  disputeId: string,
-  input: SubmitDisputeEvidenceInput,
-  signal?: AbortSignal
-): Promise<DisputeEvidence> {
-  return apiClient<DisputeEvidence>(
-    `/api/disputes/${encodeURIComponent(disputeId)}/evidence`,
-    { method: "POST", body: input, signal }
-  );
-}
-
-/** Assign an arbitrator to a dispute. */
-export function assignDisputeArbitrator(
-  disputeId: string,
-  input: AssignArbitratorInput,
-  signal?: AbortSignal
-): Promise<Dispute> {
-  return apiClient<Dispute>(
-    `/api/disputes/${encodeURIComponent(disputeId)}/arbitrator`,
-    { method: "POST", body: input, signal }
-  );
-}
-
-/** Record the arbitrator's decision on a dispute. */
-export function resolveDispute(
-  disputeId: string,
-  input: ResolveDisputeInput,
-  signal?: AbortSignal
-): Promise<Dispute> {
-  return apiClient<Dispute>(
-    `/api/disputes/${encodeURIComponent(disputeId)}/resolve`,
-    { method: "POST", body: input, signal }
-  );
-}
-
-/** Enforce the recorded resolution (e.g. move funds accordingly). */
-export function enforceDisputeResolution(
-  disputeId: string,
-  signal?: AbortSignal
-): Promise<Dispute> {
-  return apiClient<Dispute>(
-    `/api/disputes/${encodeURIComponent(disputeId)}/enforce`,
-    { method: "POST", signal }
-  );
+  return {
+    cosigners: rawCosigners.map(normalizeCoSigner),
+    cosignerThreshold: threshold,
+  };
 }
